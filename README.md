@@ -1,5 +1,5 @@
 # 2021_NI_scGCB
-This repository contains script used for scGCB paper, including:  
+This repository contains scripts used for scGCB paper, including:  
 * **script**:  
     * `GCB_NP.Rmd`: Classical analysis of scRNA-seq data of NP-specific GC B cells  
     * `Signature_score.Rmd`: Signature score calculation based on gene list  
