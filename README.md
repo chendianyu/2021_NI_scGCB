@@ -6,7 +6,6 @@ This repository contains script used for scGCB paper. The structure is:
     * Topic_model.Rmd: Topic modeling of scRNA-seq data  
     * Igblast_parsing.Rmd: Detailed code for parsing output of CellRanger VDJ and IgBlast  
     * BCR.Rmd: Combine BCR (affinity) info with scRNA-seq to identify difference between high- and low-affinity groups  
-    * monocle2.R: Pseudotime analysis
+    * monocle2.R: Pseudotime analysis using Monocle 2
 
-* html: Corresponding html output of `.Rmd` file in directory `script`  
-* signature_gene
+* html: Corresponding html output of `.Rmd` file in directory `script` 
