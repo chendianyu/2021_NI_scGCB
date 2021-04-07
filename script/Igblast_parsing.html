@@ -190,8 +190,7 @@ pre code {
     --fastqs=/xx/project/GCB_NP/BCR</code></pre>
 <p>CellRanger’s output gives us many useful information, such as identity of each gene segment. However, we want to check mutations of each BCR, so we have to do the Blast by ourselves.<br />
 Firstly, we extract the contig ID with valid IgH chain. CellRanger’s output contains cell barcode and contig ID as sometimes more than one heavy or light chain can be assembled, while usually these are not biological meaningful. Thus, we need to do some filtering:</p>
-<pre class="r"><code>## e.g.
-## Read the output of CellRanger VDJ
+<pre class="r"><code>## Read the output of CellRanger VDJ
 bcr_summary_filtered &lt;- read.csv(&quot;data/filtered_contig_annotations.csv&quot;, 
                                  stringsAsFactors = FALSE)
 ## Heavy chain
@@ -357,7 +356,7 @@ for (i in 1:nrow(igblast)) {
 }
 
 ## Check whether pos 99 of vgene of query is G 
-## Check query sequence directly because it usually not map to V gene in database
+## Check query sequence directly because it usually does not map to V gene in database
 result$G99 &lt;- 0
 for (i in 1:nrow(igblast)) {
     if ((igblast$v_germline_start[i]+1)%/%3&lt;99 &amp; nchar(igblast$sequence_alignment_aa[i])+vgene_mutation_offset[i]&gt;=99) {
