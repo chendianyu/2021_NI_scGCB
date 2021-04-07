@@ -1,0 +1,244 @@
+---
+title: "Parsing result of CellRanger VDJ and IgBlast"
+author: "Dianyu Chen"
+date: "2021/4/6"
+output: 
+  html_document:
+      toc: true
+      theme: united
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In this vignette, we show code for parsing CellRanger VDJ output, performing IgBlast and parsing IgBlast result for downstream analysis. 
+
+## Extract valid IgH contig ID from CellRanger VDJ output
+For the BCR, similarly, raw Fastq files were processed by CellRanger (v3.1.0) with default parameters:
+```
+## VDJ
+/xx/software/cellranger-3.1.0/cellranger vdj --id=GCB_NP_BCR_result \
+    --reference=/xx/reference/10x/refdata-cellranger-vdj-GRCm38-alts-ensembl-3.1.0 \
+    --fastqs=/xx/project/GCB_NP/BCR
+```
+  
+CellRanger's output gives us many useful information, such as identity of each gene segment. However, we want to check mutations of each BCR, so we have to do the Blast by ourselves.  
+Firstly, we extract the contig ID with valid IgH chain. CellRanger's output contains cell barcode and contig ID as sometimes more than one heavy or light chain can be assembled, while usually these are not biological meaningful. Thus, we need to do some filtering:  
+```{r, eval=FALSE}
+## Read the output of CellRanger VDJ
+bcr_summary_filtered <- read.csv("data/filtered_contig_annotations.csv", 
+                                 stringsAsFactors = FALSE)
+## Heavy chain
+igh <- bcr_summary_filtered[bcr_summary_filtered$chain == "IGH", ]
+## Productive
+igh_prod <- igh[igh$productive == "True",]
+## Have V gene assigned
+igh_prod_vgene <- igh_prod[igh_prod$v_gene != "None", ]
+## Remove cell barcode with more than 1 heavy chain assembled
+igh_prod_vgene_dedup <- igh_prod_vgene %>%
+    group_by(barcode) %>% 
+    filter(n() == 1)
+## Export valid contig ID
+write.table(igh_prod_vgene_dedup$contig_id, 
+          "cellranger_igh_valid_contig_id.txt", 
+          quote = FALSE,
+          row.names = FALSE,
+          col.names = FALSE)
+```
+  
+## Extract corresponding sequence and perform IgBlast
+Now that we get the valid contig ID, we can extract corresponding sequence from CellRanger's assembled FASTA file and perform alignment by IgBlast.
+```{r, eval=FALSE}
+## Extract FASTA sequence
+## seqtk v1.3-r106 by Heng Li
+seqtk subseq filtered_contig.fasta cellranger_igh_valid_contig_id.txt > cellranger_igh_valid_contig.fa
+
+## Alignment by IgBlast v1.14.0
+## Germline reference is built according to IgBlast's tutorial
+## https://ncbi.github.io/igblast/cook/How-to-set-up.html
+/xx/software/ncbi-igblast-1.14.0/bin/igblastn \
+   -germline_db_V /xx/software/ncbi-igblast-1.14.0/imgt/mouse_ighv \
+   -germline_db_D /xx/software/ncbi-igblast-1.14.0/imgt/mouse_ighd \
+   -germline_db_J /xx/software/ncbi-igblast-1.14.0/imgt/mouse_ighj \
+   -num_alignments_V 1 \
+   -num_alignments_D 1 \
+   -num_alignments_J 1 \
+   -organism mouse \
+   -query cellranger_igh_valid_contig.fa \
+   -show_translation \
+   -outfmt 19 \
+   -out cellranger_igh_valid_contig_igblast_annotation.tsv
+```
+  
+## IgBlast result parsing
+Now it is time to parse the IgBlast result.
+```{r, eval=FALSE}
+## Parse IgBlast result
+igblast <- read.delim("../data/cellranger_igh_valid_contig_igblast_annotation", 
+                      stringsAsFactors = FALSE)
+result <- igblast %>% 
+    dplyr::select(barcode = sequence_id,
+                  chain = locus,
+                  stop_codon,
+                  productive,
+                  v_gene = v_call,
+                  v_score,
+                  v_evalue = v_support,
+                  d_gene = d_call,
+                  d_score,
+                  d_evalue = d_support,
+                  j_gene = j_call,
+                  j_score,
+                  j_evalue = j_support,
+                  v_germline_start)
+## IgBlast do not give the C gene identity, 
+## so extract that information from CellRanger's output
+result <- add_column(result, 
+                     c_gene = igh_prod_vgene_dedup$c_gene[match(igblast$sequence_id, 
+                                                                igh_prod_vgene_dedup$contig_id)], 
+                     .after = "j_evalue")
+
+## Length of BCR
+result <- add_column(result, 
+                     length = sapply(strsplit(igblast$sequence, ""), length), 
+                     .after = "chain")
+## Length of V gene segment
+result$Total_length <- nchar(igblast$v_sequence_alignment)
+
+## Compare each nucleotide of V gene and calculate the number of match
+vgene_nt_match <- sapply(1:nrow(igblast), function(x) {
+    apply(do.call(rbind, strsplit(c(igblast[x,]$v_sequence_alignment, igblast[x,]$v_germline_alignment), "")), 
+          2, 
+          function(i){
+              i[1] == i[2]
+          }
+    )
+}
+)
+result$Total_match <- sapply(vgene_nt_match, sum)
+
+## nt mismatch count
+## remove count of gap
+vgene_nt_mismatch <- sapply(1:nrow(igblast), function(x) {
+    apply(do.call(rbind, strsplit(c(igblast[x,]$v_sequence_alignment, igblast[x,]$v_germline_alignment), "")), 
+          2, 
+          function(i){
+              i[1] != i[2] & i[1] != "-" & i[2] != "-"
+          }
+    )
+}
+)
+result$Total_mismatch <- sapply(vgene_nt_mismatch, sum)
+
+## Calculate gap and identity
+gap_query <- str_count(igblast$v_sequence_alignment, "-")
+gap_ref <- str_count(igblast$v_germline_alignment, "-")
+result <- result %>%
+    mutate(Total_diff = Total_length-Total_match,
+           Total_gap = gap_query + gap_ref,
+           Total_identity = Total_match/Total_length)
+
+## Different length of amino acids of query and reference indicate Indel,
+## which needs manual recording
+result$indel <- ifelse(nchar(igblast$v_sequence_alignment_aa)==nchar(igblast$v_germline_alignment_aa), 
+                       0, 
+                       1)
+
+## V gene mutation position offset
+## Sometimes first several nucleotide may not be well assembled
+vgene_mutation_offset <- (igblast$v_germline_start + 1) %/% 3
+
+## Compare each amino acid of V gene
+vgene_aa_match <- sapply(1:nrow(igblast), function(x) {
+    apply(do.call(rbind, strsplit(c(igblast[x,]$v_sequence_alignment_aa, 
+                                    igblast[x,]$v_germline_alignment_aa), 
+                                  "")), 
+          2, 
+          function(i){
+              i[1] == i[2]
+          }
+    )
+}
+)
+vgene_mutation_pos <- lapply(vgene_aa_match, function(x) which(!x))
+## Add offset for position
+vgene_mutation_pos <- lapply(1:nrow(igblast), 
+                             function(i) vgene_mutation_pos[[i]] + 
+                                 vgene_mutation_offset[i])
+
+## Check whether pos 33 has mutation
+result$mismatch33 <- ifelse(sapply(vgene_mutation_pos, function(x) 33 %in% x), 1, 0)
+## Check whether pos 33 of V gene of query is L 
+result$L33 <- 0
+for (i in 1:nrow(igblast)) {
+    if ((igblast$v_germline_start[i]+1)%/%3<33 & igblast$v_germline_end[i]%/%3>=33) {
+        if (str_split(igblast$v_sequence_alignment_aa[i], 
+                      "", 
+                      simplify = TRUE)[33-vgene_mutation_offset[i]] == "L") {
+            result$L33[i] <- 1
+        }
+    }
+}
+
+## Check whether pos 59 of vgene of query is R 
+result$R59 <- 0
+for (i in 1:nrow(igblast)) {
+    if ((igblast$v_germline_start[i]+1)%/%3<59 & igblast$v_germline_end[i]%/%3>=59) {
+        if (str_split(igblast$v_sequence_alignment_aa[i], 
+                      "", 
+                      simplify = TRUE)[59-vgene_mutation_offset[i]] == "R") {
+            result$R59[i] <- 1
+        }
+    }
+}
+
+## Check whether pos 99 of vgene of query is G 
+## Check query sequence directly because it usually does not map to V gene in database
+result$G99 <- 0
+for (i in 1:nrow(igblast)) {
+    if ((igblast$v_germline_start[i]+1)%/%3<99 & nchar(igblast$sequence_alignment_aa[i])+vgene_mutation_offset[i]>=99) {
+        if (str_split(igblast$sequence_alignment_aa[i], 
+                      "", 
+                      simplify = TRUE)[99-vgene_mutation_offset[i]] == "G") {
+            result$G99[i] <- 1
+        }
+    }
+}
+
+## label 33
+## 0: not IGHV1-72*01
+## 1: IGHV1-72*01 and W33L
+## 2: IGHV1-72*01 and W33W
+## 3: IGHV1-72*01 and 33 other
+result$W33L <- 0
+for (i in 1:nrow(igblast)) {
+    if (result$v_gene[i] == "IGHV1-72*01" & result$mismatch33[i] == 0) {
+        result$W33L[i] <- 2
+    }
+    else if (result$v_gene[i] == "IGHV1-72*01" & result$L33[i] == 1) {
+        result$W33L[i] <- 1
+    }
+    else if (result$v_gene[i] == "IGHV1-72*01" & result$mismatch33[i] == 1 & result$L33[i] == 0) {
+        result$W33L[i] <- 3
+    }
+}
+## 4: IGHV1-72*01 and W33W, K59R, 99G
+## 100-fold affinity than unmutated ones
+for (i in 1:nrow(igblast)) {
+    if (result$W33L[i]==2 & result$R59[i]==1 & result$G99[i]==1) {
+        result$W33L[i] <- 4
+    }
+}
+```
+  
+## Attention
+We still have some problems that haven't been solved perfectly:  
+  
+1. IgBlast gives query sequence and aligned germline sequence in the form of nucleotides and amino acids. However, unlike nucleotides which add dash("-") in query or germline sequence to indicate Insertion/Deletion, amino acid sequence do not have this kind of placeholder. It will result in the wrong position of mutation, so we use `indel` to indicate whether there is indel between query and germline sequence. For those `indel==1`, we need to manually record the information through IgBlast Web version. Luckily, there aren't many of them. If anyone has good idea to handle this problem, please contact to me (chendianyu@westlake.edu.cn). Thank you!
+2. IgBlast does not give the identity of C gene, so here we use the information from CellRanger. Does anyone have idea that are there any tools available to identify C gene based on FASTA sequence?
+
+## Session info
+```{r}
+sessionInfo()
+```

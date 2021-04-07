@@ -1,0 +1,150 @@
+---
+title: "Analysis of scRNA-seq data of NP-specific GC B cells at 13dpi"
+author: "Dianyu Chen"
+date: "2021/4/6"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In our experiment, we immunized 2 WT B6 mice separately with NP-KLH+LPS+Alumn, sacrificed at 13dpi, and NP-specific GC B cells were sorted to load 10X 5' scRNA-seq. Raw Fastq files were processed by CellRanger (v3.1.0) with default parameters:
+```
+## e.g.
+## GEX
+/xx/software/cellranger-3.1.0/cellranger count --id=GCB_NP_mRNA_result \
+    --transcriptom=/xx/reference/10x/refdata-cellranger-mm10-3.0.0 \
+    --fastqs=/xx/GCB_NP/5_mRNA
+```
+
+We got count matrix output from CellRanger, then loaded them into R (v3.6.1) and performed downstream analysis with Seurat (v3.1.0).  
+Firstly, load the packages needed and define the function to read in CellRanger output:
+```{r load_package, message=FALSE, warning=FALSE}
+library(Seurat)
+library(Matrix)
+library(tidyverse)
+library(Matrix.utils)
+
+read_10x_matrix <- function(matrix_dir, project_id){
+    barcode.path <- paste0(matrix_dir, "barcodes.tsv.gz")
+    features.path <- paste0(matrix_dir, "features.tsv.gz")
+    matrix.path <- paste0(matrix_dir, "matrix.mtx.gz")
+    mat <- readMM(file = matrix.path)
+    feature.names = read.delim(features.path, 
+                               header = FALSE,
+                               stringsAsFactors = FALSE)
+    barcode.names = read.delim(barcode.path, 
+                               header = FALSE,
+                               stringsAsFactors = FALSE)
+    colnames(mat) = barcode.names$V1
+    rownames(mat) = feature.names$V2
+    ## some ensembl gene ids correspond to same gene symbol
+    ## thus we combine these rows 
+    mat <- aggregate.Matrix(mat, rownames(mat), FUN="sum")
+    seurat_object <- CreateSeuratObject(counts = mat, 
+                                        project = project_id, 
+                                        min.cells = 3, 
+                                        min.features = 200)
+    return(seurat_object)
+}
+```
+
+After finishing all the preparations, read the count matrix file:
+```{r, warning=FALSE}
+gcb_np_batch1 <- read_10x_matrix("../data/filtered_feature_bc_matrix_np_batch1/", 
+                                 "gcb_np_batch1")
+gcb_np_batch2 <- read_10x_matrix("../data/filtered_feature_bc_matrix_np_batch2/", 
+                                 "gcb_np_batch2")
+```
+
+Then perform QC and integrate 2 batches of data:
+```{r integration, message=FALSE}
+## Integrate two batches
+gcb_np_list <- list(gcb_np_batch1, gcb_np_batch2)
+cell_prefix_gcb_np <- c("gcb_np_batch1", "gcb_np_batch2")
+for (i in 1:length(gcb_np_list)) {
+    gcb_np_list[[i]] <- RenameCells(gcb_np_list[[i]], 
+                                     add.cell.id = cell_prefix_gcb_np[i])
+    gcb_np_list[[i]][["percent.mt"]] <- PercentageFeatureSet(gcb_np_list[[i]], 
+                                                             pattern = "^mt-")
+    gcb_np_list[[i]] <- subset(gcb_np_list[[i]], 
+                                subset = nFeature_RNA > 500 & nCount_RNA < 20000 & percent.mt < 10)
+    gcb_np_list[[i]] <- NormalizeData(gcb_np_list[[i]], 
+                                      verbose = FALSE)
+    gcb_np_list[[i]] <- FindVariableFeatures(gcb_np_list[[i]], 
+                                             selection.method = "vst", 
+                                              nfeatures = 2000, 
+                                             verbose = FALSE)
+}
+
+gcb_np_anchors <- FindIntegrationAnchors(object.list = gcb_np_list, 
+                                         dims = 1:30)
+gcb_np_integrated <- IntegrateData(anchorset = gcb_np_anchors, 
+                                    dims = 1:30)
+```
+  
+After integration, perform scaling and linear dimensional reduction:
+```{r, message=FALSE}
+DefaultAssay(gcb_np_integrated) <- "integrated"
+gcb_np_integrated <- ScaleData(gcb_np_integrated)
+gcb_np_integrated <- RunPCA(gcb_np_integrated, 
+                            features = VariableFeatures(object = gcb_np_integrated))
+ElbowPlot(gcb_np_integrated)
+```
+  
+  
+Based on the Elbow plot, we choose 15 PCs for further non-linear dimensional reduction and clustering:
+```{r, message=FALSE, warning=FALSE}
+gcb_np_integrated <- FindNeighbors(gcb_np_integrated, dims = 1:15)
+gcb_np_integrated <- FindClusters(gcb_np_integrated, resolution = 0.2)
+gcb_np_integrated <- RunUMAP(gcb_np_integrated, dims = 1:15)
+```
+  
+  
+So, finally `r ncol(gcb_np_integrated)` cells remained, divided into `r length(levels(gcb_np_integrated$seurat_clusters))` clusters, without significant batch effects:
+```{r, warning=FALSE}
+## group by cluster
+DimPlot(gcb_np_integrated,
+        pt.size = 0.01,
+        label = T) +
+    coord_equal(expand = FALSE)+
+    lims(x=c(-7,15), y=c(-7,15))
+## group by mouse
+DimPlot(gcb_np_integrated,
+        group.by = "orig.ident",
+        pt.size = 0.01) +
+    coord_equal(expand = FALSE)+
+    lims(x=c(-7,15), y=c(-7,15)) 
+```
+
+Based on the clustering result, we perform DEG analysis on each cluster:
+```{r, warning=FALSE, message=FALSE, fig.height=10, fig.width=10}
+## change assay to orignal data
+DefaultAssay(gcb_np_integrated) <- "RNA"
+gcb_np_integrated <- ScaleData(gcb_np_integrated)
+gcb_np_integrated$orig.ident <- factor(gcb_np_integrated$orig.ident)
+gcb_np_integrated.markers <- FindAllMarkers(gcb_np_integrated,
+                                             test.use = "MAST",
+                                             only.pos = TRUE, 
+                                             min.pct = 0.25, 
+                                             logfc.threshold = 0.25, 
+                                             latent.vars = "orig.ident")
+top10_gcb_np_integrated <- gcb_np_integrated.markers %>% 
+    group_by(cluster) %>% 
+    arrange(p_val_adj) %>% 
+    slice(1:10)
+DoHeatmap(gcb_np_integrated, 
+          features = top10_gcb_np_integrated$gene, 
+          angle = 0,
+          draw.lines = FALSE) +
+    scale_fill_gradientn(colors = c("#1565C0", "white", "#b92b27"))
+```
+
+According to the marker genes of each cluster, we find that cluster 6 is T cell, thus exclude them in downstream analysis.
+
+## Session info
+```{r}
+sessionInfo()
+```
+
