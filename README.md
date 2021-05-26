@@ -1,5 +1,5 @@
 # 2021_NI_scGCB
-This repository contains scripts used for scGCB paper, including:  
+This repository contains some scripts used for our Nature Immunology paper entitled ["Coupled analysis of transcriptome and BCR mutations reveals role of OXPHOS in affinity maturation"](https://www.nature.com/articles/s41590-021-00936-y), including:  
 * **script**:  
     * `GCB_NP.Rmd`: Classical analysis of scRNA-seq data of NP-specific GC B cells  
     * `Signature_score.Rmd`: Signature score calculation based on gene list  
